@@ -13,7 +13,10 @@ import (
 	"atlasdesk/internal/config"
 	"atlasdesk/internal/job"
 	"atlasdesk/internal/platform/database"
+	"atlasdesk/internal/platform/embedding"
+	"atlasdesk/internal/platform/rag"
 	"atlasdesk/internal/platform/redis"
+	"atlasdesk/internal/platform/retrieval"
 	"atlasdesk/internal/platform/storage"
 	"atlasdesk/internal/repository"
 	"atlasdesk/internal/service"
@@ -49,6 +52,7 @@ func main() {
 	var knowledgeRepo repository.KnowledgeRepository
 	var knowledgeSvc service.KnowledgeService
 	var knowledgeHandler *handler.KnowledgeHandler
+	var assistantHandler *handler.AssistantHandler
 
 	dbClient, dbErr = database.New(&cfg.Database)
 	if dbErr != nil {
@@ -86,6 +90,14 @@ func main() {
 		knowledgeRepo = repository.NewKnowledgeRepository(dbClient.GormDB)
 		knowledgeSvc = service.NewKnowledgeService(knowledgeRepo, storageClient, taskDistributor, chunkRepo)
 		knowledgeHandler = handler.NewKnowledgeHandler(knowledgeSvc)
+
+		// 组装 RAG 智能助手仓储、检索器、引擎与服务实例
+		convRepo := repository.NewConversationRepository(dbClient.GormDB)
+		convSvc := service.NewConversationService(convRepo)
+		embedder := embedding.NewMockEmbedder()
+		retriever := retrieval.NewHybridRetriever(dbClient.GormDB)
+		ragEngine := rag.NewEngine(embedder, retriever, convRepo, nil)
+		assistantHandler = handler.NewAssistantHandler(convSvc, ragEngine)
 	}
 
 	// 5. 初始化 Redis 客户端 (用于健康检查与业务缓存)
@@ -110,13 +122,14 @@ func main() {
 	}
 	healthHandler := handler.NewHealthHandler(dbChecker, redisChecker)
 
-	// 7. 初始化 HTTP 路由，按规范挂载 9 层中间件与认证、知识库路由
+	// 7. 初始化 HTTP 路由，按规范挂载 9 层中间件与认证、知识库、RAG 助手路由
 	router := transporthttp.NewRouter(&transporthttp.RouterDeps{
 		Config:           cfg,
 		HealthHandler:    healthHandler,
 		AuthHandler:      authHandler,
 		AuthService:      authSvc,
 		KnowledgeHandler: knowledgeHandler,
+		AssistantHandler: assistantHandler,
 	})
 
 	// 8. 配置 HTTP 服务实例

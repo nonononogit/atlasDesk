@@ -15,6 +15,7 @@ type RouterDeps struct {
 	AuthHandler      *handler.AuthHandler
 	AuthService      service.AuthService
 	KnowledgeHandler *handler.KnowledgeHandler
+	AssistantHandler *handler.AssistantHandler
 }
 
 // NewRouter 创建并初始化符合规范第 6.2 节的 Gin 路由引擎
@@ -109,6 +110,22 @@ func NewRouter(deps *RouterDeps) *gin.Engine {
 						docWrite.POST("/:id/versions", deps.KnowledgeHandler.CreateNewVersion)
 						docWrite.DELETE("/:id", deps.KnowledgeHandler.DeleteDocument)
 					}
+				}
+
+				// RAG 助手会话与流式问答路由
+				if deps.AssistantHandler != nil {
+					conv := protected.Group("/conversations")
+					{
+						conv.GET("", deps.AssistantHandler.ListConversations)
+						conv.POST("", deps.AssistantHandler.CreateConversation)
+						conv.GET("/:id", deps.AssistantHandler.GetConversation)
+						conv.DELETE("/:id", deps.AssistantHandler.DeleteConversation)
+						conv.GET("/:id/messages", deps.AssistantHandler.ListMessages)
+						conv.POST("/:id/messages/stream", deps.AssistantHandler.SendMessageStream)
+					}
+
+					protected.GET("/citations/:id", deps.AssistantHandler.GetCitation)
+					protected.POST("/messages/:id/feedback", deps.AssistantHandler.SubmitFeedback)
 				}
 			}
 		}

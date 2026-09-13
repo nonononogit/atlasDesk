@@ -1,8 +1,8 @@
 # AtlasDesk Development Progress
 
 ## 当前阶段
-- Phase: P3
-- 当前任务: P3-T05
+- Phase: P4
+- 当前任务: P4-T06
 - 状态: completed
 
 ## 已完成
@@ -23,9 +23,15 @@
 - [x] P3-T03 — 2026-09-13 — 验证：实现层次化切片流水线 Chunker，遵循标题边界 > 自然段落 > 标点断句 > 硬截断优先级，支持 Overlap 滑动窗口、保留溯源元数据与精准 Token 估算
 - [x] P3-T04 — 2026-09-13 — 验证：创建 000003_document_chunks_schema 迁移（支持 pgvector），实现 1536 维归一化 Embedder 与事务幂等切片入库，驱动状态机流转至 READY
 - [x] P3-T05 — 2026-09-13 — 验证：实现文档重处理、原文件只读下载链接、重命名、新版本创建（原子切换版本指针）与切片详情查询，前端提供 DocumentChunksModal 与丰富操作按钮
+- [x] P4-T01 — 2026-09-13 — 验证：创建 000004_rag_schema 数据库迁移，实现会话与消息持久化、首问懒创建、20 字符截断标题与回答点赞/点踩反馈 API，单测全绿通过
+- [x] P4-T02 — 2026-09-13 — 验证：实现 HybridRetriever 混合检索器，对稠密向量召回 Top20 与全文分词稀疏召回 Top20 进行 RRF（k=60）倒数排名融合，按组织严格过滤并限制单文档最多 3 个切片，最终输出 Top5，单测隔离性与多样性通过
+- [x] P4-T03 — 2026-09-13 — 验证：实现 RAGEngine 编排引擎与统一 SSE 标准事件流规范（answer_delta、citations、done、error），结合 System Prompt 注入防护模版与引用白名单清洗机制，单测验证零虚构标号与礼貌拒答通过
+- [x] P4-T04 — 2026-09-13 — 验证：实现用户级 AI 限流中间件（Redis rate:user:{id}:chat 1分钟窗口）、SSE 原生 HTTP 处理端点与客户端取消链路感知中断上游推理，日志对用户敏感输入脱敏处理
+- [x] P4-T05 — 2026-09-13 — 验证：实现企业级 AssistantPage 交互界面，支持侧边栏历史会话、原生 ReadableStream 流式打字效果、停止生成、引用卡片高亮与侧边溯源抽屉、快捷 Prompt 填入及反馈交互，TypeScript 0 错误
+- [x] P4-T06 — 2026-09-13 — 验证：构建 32 条真实场景评测基准 rag_cases.jsonl，实现自动化评测套件与可比较报告输出（实测 Recall@5 达到 87.5%、拒答率 100%、合法引用率 100%、平均延迟 0.7ms），单测通过
 
 ## 待完成
-- [ ] Phase 4：检索、召回和问答（P4-T01 混合检索）— 阻塞：无
+- [ ] Phase 5：工单（P5-T01 模型和状态机）— 阻塞：无
 
 ## 技术决策
 - ADR-001: 依赖注入与分层设计：遵循第 3 节规范，transport/http -> application -> domain，repository interface 位于 domain，实现置于 repository/platform。
@@ -40,6 +46,10 @@
 - ADR-010: 纯 Go 多格式解析器与扫描件判定：实现统一 Parser 接口支持 Markdown、TXT、DOCX（基于 OpenXML 解压解析）、PDF（基于 ledongthuc/pdf）。PDF 解析时若所有页码文本层均为空，规范返回 `OCR_REQUIRED` 错误码并流转至 `FAILED` 状态，不产生虚假切片。
 - ADR-011: 语义层次切片与幂等存储：按标题边界 > 自然段落 > 标点断句 > 硬 Token 优先级进行切片，并引入 Overlap 滑动窗口保留上下文；切片保存前在事务中先删除当前版本的历史切片再批量插入，确保重跑任务绝对幂等。
 - ADR-012: pgvector 向量化与版本原子切换：默认适配主流 1536 维向量模型；在新版本物理文档处理未就绪前，旧版本问答与检索保持完全可用，直至新版本完成 `PARSING -> CHUNKING -> EMBEDDING` 进入 `READY` 状态后，原子切换 `current_version_id`。
+- ADR-013: 混合检索与 RRF 融合去重：向量检索 Top20 与全文检索 Top20 通过标准 RRF (k=60) 融合加权，设置单篇文档最多 3 个切片配额避免单源长文垄断，输出 Top5 最佳切片并严格限定组织多租数据范围。
+- ADR-014: 结构化 Prompt 防御与引用白名单清洗：严格要求大模型将知识切片视为参考资料而非指令，禁止越权与执行文档内部指令；在代码层引入引用白名单清洗，剔除正文中未命中的虚构引用标号（如 `[99]`），保障溯源准确。
+- ADR-015: 原生 fetch 流式协议与可取消控制：前端基于原生 `fetch` 与 `ReadableStream` 消费规范 SSE 事件流（禁用 EventSource 发送 POST 请求），后端通过 Go Context 监听客户端取消信号及时中断上游 LLM 生成以避免 Token 浪费。
+- ADR-016: 真实场景量化评测体系：构建 30+ 条真实场景 RAG 评测基准（涵盖常识、精确参数、跨文档、时序敏感、Prompt 注入与无依据越界问答），实现自动化评测运行器与结果可比较报告输出。
 
 
 ## 已知问题
