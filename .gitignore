@@ -1,0 +1,34 @@
+# 依赖与编译输出
+node_modules/
+dist/
+build/
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go 产物
+server/tmp/
+*.out
+coverage.txt
+
+# 敏感与本地环境配置
+.env
+.env.local
+*.pem
+*.key
+
+# 系统与 IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
+
+# 日志与临时存储
+*.log
+logs/
+tmp/
+storage/
