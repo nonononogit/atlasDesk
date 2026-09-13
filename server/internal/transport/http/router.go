@@ -95,6 +95,8 @@ func NewRouter(deps *RouterDeps) *gin.Engine {
 						docRead.GET("", deps.KnowledgeHandler.ListDocuments)
 						docRead.GET("/:id", deps.KnowledgeHandler.GetDocument)
 						docRead.GET("/:id/status", deps.KnowledgeHandler.GetDocumentStatus)
+						docRead.GET("/:id/download", deps.KnowledgeHandler.GetDownloadURL)
+						docRead.GET("/:id/chunks", deps.KnowledgeHandler.GetDocumentChunks)
 					}
 
 					// 文档直传与管理写路由
@@ -102,6 +104,9 @@ func NewRouter(deps *RouterDeps) *gin.Engine {
 					{
 						docWrite.POST("/uploads", deps.KnowledgeHandler.RequestUpload)
 						docWrite.POST("/:id/complete-upload", deps.KnowledgeHandler.CompleteUpload)
+						docWrite.POST("/:id/reprocess", deps.KnowledgeHandler.ReprocessDocument)
+						docWrite.PATCH("/:id/rename", deps.KnowledgeHandler.RenameDocument)
+						docWrite.POST("/:id/versions", deps.KnowledgeHandler.CreateNewVersion)
 						docWrite.DELETE("/:id", deps.KnowledgeHandler.DeleteDocument)
 					}
 				}

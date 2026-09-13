@@ -1,8 +1,8 @@
 # AtlasDesk Development Progress
 
 ## 当前阶段
-- Phase: P2
-- 当前任务: P2-T04
+- Phase: P3
+- 当前任务: P3-T05
 - 状态: completed
 
 ## 已完成
@@ -18,9 +18,14 @@
 - [x] P2-T02 — 2026-09-13 — 验证：创建 documents 与 document_versions 模型，实现多租户游标分页、按状态/MIME 筛选与关键字搜索
 - [x] P2-T03 — 2026-09-13 — 验证：实现预签名直传凭证申请，严格校验 PDF/DOCX/MD/TXT 白名单与 50MB 大小配额，单测拦截非法格式与超限文件通过
 - [x] P2-T04 — 2026-09-13 — 验证：实现确认上传核验、文档状态机流转 (UPLOADING -> UPLOADED)、重复确认幂等控制与前端 3 秒批量轮询机制
+- [x] P3-T01 — 2026-09-13 — 验证：实现基于 Asynq 的异步任务派发器 TaskDistributor 与 Worker 调度进程，任务负载采用轻量级 ID 设计并打印带有 Trace ID 的结构化日志
+- [x] P3-T02 — 2026-09-13 — 验证：实现统一 Parser 接口与 TXT、Markdown、DOCX（OpenXML 解包）、PDF 解析器，单测覆盖各格式解析并验证无文字层扫描版 PDF 准确抛出 OCR_REQUIRED
+- [x] P3-T03 — 2026-09-13 — 验证：实现层次化切片流水线 Chunker，遵循标题边界 > 自然段落 > 标点断句 > 硬截断优先级，支持 Overlap 滑动窗口、保留溯源元数据与精准 Token 估算
+- [x] P3-T04 — 2026-09-13 — 验证：创建 000003_document_chunks_schema 迁移（支持 pgvector），实现 1536 维归一化 Embedder 与事务幂等切片入库，驱动状态机流转至 READY
+- [x] P3-T05 — 2026-09-13 — 验证：实现文档重处理、原文件只读下载链接、重命名、新版本创建（原子切换版本指针）与切片详情查询，前端提供 DocumentChunksModal 与丰富操作按钮
 
 ## 待完成
-- [ ] Phase 3：解析、切片和向量（P3-T01 Worker 和状态）— 阻塞：无
+- [ ] Phase 4：检索、召回和问答（P4-T01 混合检索）— 阻塞：无
 
 ## 技术决策
 - ADR-001: 依赖注入与分层设计：遵循第 3 节规范，transport/http -> application -> domain，repository interface 位于 domain，实现置于 repository/platform。
@@ -31,6 +36,11 @@
 - ADR-006: 严格中间件管道链：中间件严格遵循 9 层安全与上下文流转，组织隔离由 OrganizationContext 强化，业务接口通过 RequirePermission 声明式校验。
 - ADR-007: 前端认证安全与无感排队：前端 Access Token 仅保存在内存变量中，防止 XSS 窃取；401 时启动单次并发锁排队调用 /api/v1/auth/refresh 换取新令牌并重放等待队列；刷新受保护路由时使用全局加载守卫，杜绝未授权界面闪现。
 - ADR-008: 预签名直传与真实进度：规避大文件经过应用服务器带来的带宽瓶颈与网络超时风险，前端通过后端签发的预签名 PUT URL 采用原生 XHR 直传 MinIO/S3，获取真实上传进度；确认上传接口校验对象存储实际元数据并实现幂等保护。
+- ADR-009: 异步队列与解耦调度：基于 Asynq (Redis) 构建文档处理异步队列，任务负载仅传递轻量级 `org_id`, `document_id`, `version_id`, `trace_id`，Worker 执行时实时从数据库获取最新记录，解耦大文件二进制网络传输与任务投递。
+- ADR-010: 纯 Go 多格式解析器与扫描件判定：实现统一 Parser 接口支持 Markdown、TXT、DOCX（基于 OpenXML 解压解析）、PDF（基于 ledongthuc/pdf）。PDF 解析时若所有页码文本层均为空，规范返回 `OCR_REQUIRED` 错误码并流转至 `FAILED` 状态，不产生虚假切片。
+- ADR-011: 语义层次切片与幂等存储：按标题边界 > 自然段落 > 标点断句 > 硬 Token 优先级进行切片，并引入 Overlap 滑动窗口保留上下文；切片保存前在事务中先删除当前版本的历史切片再批量插入，确保重跑任务绝对幂等。
+- ADR-012: pgvector 向量化与版本原子切换：默认适配主流 1536 维向量模型；在新版本物理文档处理未就绪前，旧版本问答与检索保持完全可用，直至新版本完成 `PARSING -> CHUNKING -> EMBEDDING` 进入 `READY` 状态后，原子切换 `current_version_id`。
+
 
 ## 已知问题
 - ISSUE-001: 宿主机未检测到 Docker 环境，容器编排需在容器运行时就绪或独立测试环境中使用。

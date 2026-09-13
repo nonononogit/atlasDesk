@@ -3,6 +3,8 @@ package service_test
 import (
 	"context"
 	"errors"
+	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -126,6 +128,29 @@ func (m *mockKnowledgeRepo) GetDocumentVersion(ctx context.Context, docID uuid.U
 	return nil, nil
 }
 
+func (m *mockKnowledgeRepo) GetLatestDocumentVersion(ctx context.Context, docID uuid.UUID) (*domain.DocumentVersion, error) {
+	if vers, ok := m.versions[docID]; ok {
+		maxVer := 0
+		var latest *domain.DocumentVersion
+		for v, ver := range vers {
+			if v > maxVer {
+				maxVer = v
+				latest = ver
+			}
+		}
+		return latest, nil
+	}
+	return nil, nil
+}
+
+func (m *mockKnowledgeRepo) CreateDocumentVersion(ctx context.Context, ver *domain.DocumentVersion) error {
+	if m.versions[ver.DocumentID] == nil {
+		m.versions[ver.DocumentID] = make(map[int]*domain.DocumentVersion)
+	}
+	m.versions[ver.DocumentID][ver.Version] = ver
+	return nil
+}
+
 // mockStorageClient 对象存储模拟桩
 type mockStorageClient struct {
 	objects map[string]int64
@@ -150,11 +175,16 @@ func (s *mockStorageClient) StatObject(ctx context.Context, objectKey string) (i
 	return 0, "", errors.New("nosuchkey: object not found")
 }
 
+func (s *mockStorageClient) GetObject(ctx context.Context, objectKey string) (io.ReadCloser, int64, error) {
+	content := "mock storage content"
+	return io.NopCloser(strings.NewReader(content)), int64(len(content)), nil
+}
+
 // TestKnowledgeService_Create_And_DuplicateName 验证知识库多租户重名约束
 func TestKnowledgeService_Create_And_DuplicateName(t *testing.T) {
 	repo := newMockKnowledgeRepo()
 	storageMock := newMockStorageClient()
-	svc := service.NewKnowledgeService(repo, storageMock)
+	svc := service.NewKnowledgeService(repo, storageMock, nil, nil)
 	ctx := context.Background()
 
 	org1 := uuid.New()
@@ -196,7 +226,7 @@ func TestKnowledgeService_Create_And_DuplicateName(t *testing.T) {
 func TestKnowledgeService_RequestUpload_MimeAndSize(t *testing.T) {
 	repo := newMockKnowledgeRepo()
 	storageMock := newMockStorageClient()
-	svc := service.NewKnowledgeService(repo, storageMock)
+	svc := service.NewKnowledgeService(repo, storageMock, nil, nil)
 	ctx := context.Background()
 
 	orgID := uuid.New()
@@ -243,7 +273,7 @@ func TestKnowledgeService_RequestUpload_MimeAndSize(t *testing.T) {
 func TestKnowledgeService_CompleteUpload_FlowAndIdempotent(t *testing.T) {
 	repo := newMockKnowledgeRepo()
 	storageMock := newMockStorageClient()
-	svc := service.NewKnowledgeService(repo, storageMock)
+	svc := service.NewKnowledgeService(repo, storageMock, nil, nil)
 	ctx := context.Background()
 
 	orgID := uuid.New()
@@ -286,3 +316,63 @@ func TestKnowledgeService_CompleteUpload_FlowAndIdempotent(t *testing.T) {
 		t.Errorf("幂等返回状态异常: %s", docIdempotent.Status)
 	}
 }
+
+// TestKnowledgeService_DocumentLifecycle 验证重命名、下载链接、新版本与重处理
+func TestKnowledgeService_DocumentLifecycle(t *testing.T) {
+	repo := newMockKnowledgeRepo()
+	storageMock := newMockStorageClient()
+	svc := service.NewKnowledgeService(repo, storageMock, nil, nil)
+	ctx := context.Background()
+
+	orgID := uuid.New()
+	kb, _ := svc.CreateKnowledgeBase(ctx, orgID, &domain.CreateKnowledgeBaseReq{Name: "生命周期库"})
+
+	uploadResp, _ := svc.RequestUpload(ctx, orgID, &domain.DocumentUploadReq{
+		KnowledgeBaseID: kb.ID.String(),
+		Name:            "doc1.txt",
+		MimeType:        "text/plain",
+		Size:            100,
+	})
+	docID, _ := uuid.Parse(uploadResp.DocumentID)
+	storageMock.objects[uploadResp.ObjectKey] = 100
+	_, _ = svc.CompleteUpload(ctx, orgID, docID, &domain.CompleteUploadReq{})
+
+	// 1. 重命名测试
+	renamedDoc, err := svc.RenameDocument(ctx, orgID, docID, "新名称.txt")
+	if err != nil {
+		t.Fatalf("重命名失败: %v", err)
+	}
+	if renamedDoc.Name != "新名称.txt" {
+		t.Errorf("重命名结果不符合预期: %s", renamedDoc.Name)
+	}
+
+	// 2. 签发下载链接测试
+	dlURL, err := svc.GetDownloadURL(ctx, orgID, docID)
+	if err != nil {
+		t.Fatalf("获取下载链接失败: %v", err)
+	}
+	if !strings.Contains(dlURL, "download") {
+		t.Errorf("下载链接格式异常: %s", dlURL)
+	}
+
+	// 3. 创建新版本测试 (预期版本号为 2)
+	v2Resp, err := svc.CreateNewVersion(ctx, orgID, docID, &domain.DocumentUploadReq{
+		KnowledgeBaseID: kb.ID.String(),
+		Name:            "新名称_v2.txt",
+		MimeType:        "text/plain",
+		Size:            120,
+	})
+	if err != nil {
+		t.Fatalf("创建新版本失败: %v", err)
+	}
+	if !strings.Contains(v2Resp.ObjectKey, "/v2/") {
+		t.Errorf("新版本存储路径未递增版本号: %s", v2Resp.ObjectKey)
+	}
+
+	// 4. 重处理测试
+	err = svc.ReprocessDocument(ctx, orgID, docID)
+	if err != nil {
+		t.Fatalf("重处理触发失败: %v", err)
+	}
+}
+

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"atlasdesk/internal/config"
+	"atlasdesk/internal/job"
 	"atlasdesk/internal/platform/database"
 	"atlasdesk/internal/platform/redis"
 	"atlasdesk/internal/platform/storage"
@@ -18,6 +19,7 @@ import (
 	"atlasdesk/internal/service"
 	transporthttp "atlasdesk/internal/transport/http"
 	"atlasdesk/internal/transport/http/handler"
+	"github.com/hibiken/asynq"
 )
 
 func main() {
@@ -72,13 +74,21 @@ func main() {
 		authSvc = service.NewAuthService(authRepo, &cfg.JWT)
 		authHandler = handler.NewAuthHandler(authSvc)
 
+		// 组装切片仓储与异步任务派发器
+		chunkRepo := repository.NewChunkRepository(dbClient.GormDB)
+		taskDistributor := job.NewRedisTaskDistributor(asynq.RedisClientOpt{
+			Addr:     cfg.Redis.Addr(),
+			Password: cfg.Redis.Password,
+			DB:       cfg.Redis.DB,
+		})
+
 		// 组装知识库业务仓储与服务实例
 		knowledgeRepo = repository.NewKnowledgeRepository(dbClient.GormDB)
-		knowledgeSvc = service.NewKnowledgeService(knowledgeRepo, storageClient)
+		knowledgeSvc = service.NewKnowledgeService(knowledgeRepo, storageClient, taskDistributor, chunkRepo)
 		knowledgeHandler = handler.NewKnowledgeHandler(knowledgeSvc)
 	}
 
-	// 5. 初始化 Redis 客户端
+	// 5. 初始化 Redis 客户端 (用于健康检查与业务缓存)
 	var redisClient *redis.Client
 	var redisErr error
 	redisClient, redisErr = redis.New(&cfg.Redis)

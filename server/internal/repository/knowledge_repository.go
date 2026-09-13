@@ -27,6 +27,8 @@ type KnowledgeRepository interface {
 	UpdateDocument(ctx context.Context, doc *domain.Document) error
 	DeleteDocument(ctx context.Context, orgID uuid.UUID, id uuid.UUID) error
 	GetDocumentVersion(ctx context.Context, docID uuid.UUID, version int) (*domain.DocumentVersion, error)
+	GetLatestDocumentVersion(ctx context.Context, docID uuid.UUID) (*domain.DocumentVersion, error)
+	CreateDocumentVersion(ctx context.Context, ver *domain.DocumentVersion) error
 }
 
 // GormKnowledgeRepository 基于 GORM 实现的知识库仓储
@@ -237,3 +239,25 @@ func (r *GormKnowledgeRepository) GetDocumentVersion(ctx context.Context, docID 
 	}
 	return &ver, nil
 }
+
+// GetLatestDocumentVersion 查询文档当前最大的物理版本号记录
+func (r *GormKnowledgeRepository) GetLatestDocumentVersion(ctx context.Context, docID uuid.UUID) (*domain.DocumentVersion, error) {
+	var ver domain.DocumentVersion
+	err := r.db.WithContext(ctx).
+		Where("document_id = ?", docID).
+		Order("version DESC").
+		First(&ver).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &ver, nil
+}
+
+// CreateDocumentVersion 新增物理版本记录
+func (r *GormKnowledgeRepository) CreateDocumentVersion(ctx context.Context, ver *domain.DocumentVersion) error {
+	return r.db.WithContext(ctx).Create(ver).Error
+}
+

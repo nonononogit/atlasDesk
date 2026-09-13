@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"atlasdesk/internal/domain"
+	"atlasdesk/internal/job"
 	"atlasdesk/internal/platform/storage"
 	"atlasdesk/internal/repository"
 	"github.com/google/uuid"
@@ -39,19 +42,35 @@ type KnowledgeService interface {
 	RequestUpload(ctx context.Context, orgID uuid.UUID, req *domain.DocumentUploadReq) (*domain.DocumentUploadResp, error)
 	CompleteUpload(ctx context.Context, orgID uuid.UUID, docID uuid.UUID, req *domain.CompleteUploadReq) (*domain.Document, error)
 	DeleteDocument(ctx context.Context, orgID uuid.UUID, docID uuid.UUID) error
+
+	// 文档生命周期与版本操作 (符合规格 5.5 节)
+	ReprocessDocument(ctx context.Context, orgID uuid.UUID, docID uuid.UUID) error
+	GetDownloadURL(ctx context.Context, orgID uuid.UUID, docID uuid.UUID) (string, error)
+	RenameDocument(ctx context.Context, orgID uuid.UUID, docID uuid.UUID, newName string) (*domain.Document, error)
+	CreateNewVersion(ctx context.Context, orgID uuid.UUID, docID uuid.UUID, req *domain.DocumentUploadReq) (*domain.DocumentUploadResp, error)
+	GetDocumentChunks(ctx context.Context, orgID uuid.UUID, docID uuid.UUID) ([]domain.DocumentChunk, error)
 }
 
 // DefaultKnowledgeService 知识库业务服务实现
 type DefaultKnowledgeService struct {
-	repo    repository.KnowledgeRepository
-	storage storage.StorageClient
+	repo        repository.KnowledgeRepository
+	storage     storage.StorageClient
+	distributor job.TaskDistributor
+	chunkRepo   repository.ChunkRepository
 }
 
 // NewKnowledgeService 构造 DefaultKnowledgeService 实例
-func NewKnowledgeService(repo repository.KnowledgeRepository, storage storage.StorageClient) *DefaultKnowledgeService {
+func NewKnowledgeService(
+	repo repository.KnowledgeRepository,
+	storage storage.StorageClient,
+	distributor job.TaskDistributor,
+	chunkRepo repository.ChunkRepository,
+) *DefaultKnowledgeService {
 	return &DefaultKnowledgeService{
-		repo:    repo,
-		storage: storage,
+		repo:        repo,
+		storage:     storage,
+		distributor: distributor,
+		chunkRepo:   chunkRepo,
 	}
 }
 
@@ -254,6 +273,19 @@ func (s *DefaultKnowledgeService) CompleteUpload(ctx context.Context, orgID uuid
 		return nil, fmt.Errorf("更新文档上传状态失败: %w", err)
 	}
 
+	// 触发后台异步解析、切片与向量化流水线
+	if s.distributor != nil {
+		payload := &domain.DocumentProcessPayload{
+			OrganizationID: orgID.String(),
+			DocumentID:     doc.ID.String(),
+			VersionID:      ver.ID.String(),
+			TraceID:        uuid.New().String(),
+		}
+		if err := s.distributor.DistributeDocumentProcess(ctx, payload); err != nil {
+			slog.Error("投递文档异步处理任务失败", "document_id", doc.ID, "error", err)
+		}
+	}
+
 	return doc, nil
 }
 
@@ -282,3 +314,153 @@ func (s *DefaultKnowledgeService) DeleteDocument(ctx context.Context, orgID uuid
 	}
 	return s.repo.DeleteDocument(ctx, orgID, doc.ID)
 }
+
+// ReprocessDocument 重新触发文档解析与向量化 (符合规格 5.5 节)
+func (s *DefaultKnowledgeService) ReprocessDocument(ctx context.Context, orgID uuid.UUID, docID uuid.UUID) error {
+	doc, err := s.GetDocument(ctx, orgID, docID)
+	if err != nil {
+		return err
+	}
+
+	// 查找目标物理版本
+	var targetVersionID *uuid.UUID
+	if doc.CurrentVersionID != nil {
+		targetVersionID = doc.CurrentVersionID
+	} else {
+		latest, err := s.repo.GetLatestDocumentVersion(ctx, doc.ID)
+		if err != nil || latest == nil {
+			return errors.New("未找到可重新处理的版本元数据")
+		}
+		targetVersionID = &latest.ID
+	}
+
+	// 重置状态流转回 UPLOADED
+	doc.Status = domain.DocStatusUploaded
+	doc.Progress = 10
+	doc.ErrorCode = ""
+	doc.ErrorMessage = ""
+	if err := s.repo.UpdateDocument(ctx, doc); err != nil {
+		return fmt.Errorf("重置文档状态失败: %w", err)
+	}
+
+	// 重新派发任务
+	if s.distributor != nil {
+		payload := &domain.DocumentProcessPayload{
+			OrganizationID: orgID.String(),
+			DocumentID:     doc.ID.String(),
+			VersionID:      targetVersionID.String(),
+			TraceID:        uuid.New().String(),
+		}
+		if err := s.distributor.DistributeDocumentProcess(ctx, payload); err != nil {
+			return fmt.Errorf("投递重新处理任务失败: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// GetDownloadURL 生成原文档只读预签名下载链接 (默认有效期 15 分钟)
+func (s *DefaultKnowledgeService) GetDownloadURL(ctx context.Context, orgID uuid.UUID, docID uuid.UUID) (string, error) {
+	doc, err := s.GetDocument(ctx, orgID, docID)
+	if err != nil {
+		return "", err
+	}
+
+	var objectKey string
+	if doc.CurrentVersion != nil && doc.CurrentVersion.ObjectKey != "" {
+		objectKey = doc.CurrentVersion.ObjectKey
+	} else {
+		latest, err := s.repo.GetLatestDocumentVersion(ctx, doc.ID)
+		if err != nil || latest == nil {
+			return "", errors.New("未找到文档对象存储文件路径")
+		}
+		objectKey = latest.ObjectKey
+	}
+
+	return s.storage.PresignDownloadURL(ctx, objectKey, 15*time.Minute)
+}
+
+// RenameDocument 重命名文档名称
+func (s *DefaultKnowledgeService) RenameDocument(ctx context.Context, orgID uuid.UUID, docID uuid.UUID, newName string) (*domain.Document, error) {
+	trimmed := strings.TrimSpace(newName)
+	if trimmed == "" {
+		return nil, errors.New("文档名称不能为空")
+	}
+
+	doc, err := s.GetDocument(ctx, orgID, docID)
+	if err != nil {
+		return nil, err
+	}
+
+	doc.Name = trimmed
+	if err := s.repo.UpdateDocument(ctx, doc); err != nil {
+		return nil, fmt.Errorf("更新文档名称失败: %w", err)
+	}
+
+	return doc, nil
+}
+
+// CreateNewVersion 创建文档新版本并返回上传预签名凭据 (新版本未就绪前不影响当前版本服务)
+func (s *DefaultKnowledgeService) CreateNewVersion(ctx context.Context, orgID uuid.UUID, docID uuid.UUID, req *domain.DocumentUploadReq) (*domain.DocumentUploadResp, error) {
+	doc, err := s.GetDocument(ctx, orgID, docID)
+	if err != nil {
+		return nil, err
+	}
+
+	if req.Size > MaxDocumentSizeBytes {
+		return nil, ErrFileSizeExceeded
+	}
+
+	// 获取现有最大版本号
+	latest, err := s.repo.GetLatestDocumentVersion(ctx, doc.ID)
+	nextVerNum := 1
+	if err == nil && latest != nil {
+		nextVerNum = latest.Version + 1
+	}
+
+	verUID := uuid.New()
+	objectKey := fmt.Sprintf("orgs/%s/kbs/%s/docs/%s/v%d/%s", orgID.String(), doc.KnowledgeBaseID.String(), doc.ID.String(), nextVerNum, req.Name)
+
+	uploadURL, err := s.storage.PresignUploadURL(ctx, objectKey, 15*time.Minute)
+	if err != nil {
+		return nil, fmt.Errorf("签发新版本预签名直传凭证失败: %w", err)
+	}
+
+	newVersion := &domain.DocumentVersion{
+		ID:          verUID,
+		DocumentID:  doc.ID,
+		Version:     nextVerNum,
+		ObjectKey:   objectKey,
+		ParseStatus: "PENDING",
+	}
+
+	if err := s.repo.CreateDocumentVersion(ctx, newVersion); err != nil {
+		return nil, fmt.Errorf("保存新版本元数据失败: %w", err)
+	}
+
+	return &domain.DocumentUploadResp{
+		DocumentID: doc.ID.String(),
+		UploadURL:  uploadURL,
+		ObjectKey:  objectKey,
+		ExpiresIn:  900,
+	}, nil
+}
+
+// GetDocumentChunks 查询文档当前版本的切片数据 (支持前端切片预览与检查)
+func (s *DefaultKnowledgeService) GetDocumentChunks(ctx context.Context, orgID uuid.UUID, docID uuid.UUID) ([]domain.DocumentChunk, error) {
+	doc, err := s.GetDocument(ctx, orgID, docID)
+	if err != nil {
+		return nil, err
+	}
+
+	if doc.CurrentVersionID == nil {
+		return []domain.DocumentChunk{}, nil
+	}
+
+	if s.chunkRepo == nil {
+		return []domain.DocumentChunk{}, nil
+	}
+
+	return s.chunkRepo.GetChunksByVersion(ctx, *doc.CurrentVersionID)
+}
+

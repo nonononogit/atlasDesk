@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react'
 import { knowledgeApi, KnowledgeBase, DocumentItem } from '../../api/knowledge'
 import { KnowledgeBaseModal } from './KnowledgeBaseModal'
 import { DocumentUploadModal } from './DocumentUploadModal'
+import { DocumentChunksModal } from './DocumentChunksModal'
 import {
   BookOpen,
   Plus,
@@ -14,6 +15,10 @@ import {
   AlertCircle,
   Loader2,
   Layers,
+  Eye,
+  Download,
+  RefreshCw,
+  Edit2,
 } from 'lucide-react'
 
 export const KnowledgePage: React.FC = () => {
@@ -28,6 +33,8 @@ export const KnowledgePage: React.FC = () => {
   // 弹窗状态
   const [isKbModalOpen, setIsKbModalOpen] = useState(false)
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false)
+  const [isChunksModalOpen, setIsChunksModalOpen] = useState(false)
+  const [selectedDocForChunks, setSelectedDocForChunks] = useState<DocumentItem | null>(null)
 
   // 1. 加载知识库列表
   const loadKnowledgeBases = useCallback(async () => {
@@ -127,7 +134,47 @@ export const KnowledgePage: React.FC = () => {
     }
   }
 
-  // 文档状态徽章格式化
+  // 重新触发处理流水线
+  const handleReprocessDoc = async (id: string) => {
+    try {
+      await knowledgeApi.reprocessDocument(id)
+      loadDocuments()
+    } catch (err: any) {
+      alert(err.message || '重新处理失败')
+    }
+  }
+
+  // 获取下载链接并下载
+  const handleDownloadDoc = async (id: string) => {
+    try {
+      const res = await knowledgeApi.getDownloadUrl(id)
+      if (res.download_url) {
+        window.open(res.download_url, '_blank')
+      }
+    } catch (err: any) {
+      alert(err.message || '获取下载链接失败')
+    }
+  }
+
+  // 重命名文档
+  const handleRenameDoc = async (doc: DocumentItem) => {
+    const newName = window.prompt('请输入新的文档名称:', doc.name)
+    if (!newName || newName.trim() === '' || newName === doc.name) return
+    try {
+      await knowledgeApi.renameDocument(doc.id, newName.trim())
+      loadDocuments()
+    } catch (err: any) {
+      alert(err.message || '重命名文档失败')
+    }
+  }
+
+  // 打开切片查看弹窗
+  const handleOpenChunks = (doc: DocumentItem) => {
+    setSelectedDocForChunks(doc)
+    setIsChunksModalOpen(true)
+  }
+
+  // 文档状态徽章格式化 (符合规格 5.1 状态流转: UPLOADING -> UPLOADED -> PARSING -> CHUNKING -> EMBEDDING -> READY / FAILED)
   const renderStatusBadge = (doc: DocumentItem) => {
     switch (doc.status) {
       case 'READY':
@@ -139,16 +186,44 @@ export const KnowledgePage: React.FC = () => {
         )
       case 'FAILED':
         return (
-          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-medium bg-rose-50 text-rose-700 border border-rose-200">
-            <AlertCircle className="w-3 h-3" />
-            <span>处理失败</span>
-          </span>
+          <div className="flex flex-col items-start gap-1" title={doc.error_message || doc.error_code}>
+            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-medium bg-rose-50 text-rose-700 border border-rose-200">
+              <AlertCircle className="w-3 h-3" />
+              <span>{doc.error_code || '处理失败'}</span>
+            </span>
+            {doc.error_message && (
+              <span className="text-[10px] text-rose-600 max-w-[160px] truncate">
+                {doc.error_message}
+              </span>
+            )}
+          </div>
         )
       case 'UPLOADED':
         return (
           <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-medium bg-sky-50 text-sky-700 border border-sky-200">
             <Clock className="w-3 h-3" />
             <span>已上传待解析</span>
+          </span>
+        )
+      case 'PARSING':
+        return (
+          <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-50 text-blue-700 border border-blue-200">
+            <Loader2 className="w-3 h-3 animate-spin" />
+            <span>解析中 (20%)</span>
+          </span>
+        )
+      case 'CHUNKING':
+        return (
+          <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium bg-purple-50 text-purple-700 border border-purple-200">
+            <Loader2 className="w-3 h-3 animate-spin" />
+            <span>切片中 (50%)</span>
+          </span>
+        )
+      case 'EMBEDDING':
+        return (
+          <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium bg-indigo-50 text-indigo-700 border border-indigo-200">
+            <Loader2 className="w-3 h-3 animate-spin" />
+            <span>向量化 (80%)</span>
           </span>
         )
       default:
@@ -332,13 +407,48 @@ export const KnowledgePage: React.FC = () => {
                       <td className="py-3 px-4">{renderStatusBadge(doc)}</td>
                       <td className="py-3 px-4 text-slate-400">{new Date(doc.created_at).toLocaleString()}</td>
                       <td className="py-3 px-4 text-right">
-                        <button
-                          onClick={() => handleDeleteDoc(doc.id)}
-                          className="p-1 text-slate-400 hover:text-rose-600 rounded transition-colors"
-                          title="删除文档"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
+                        <div className="flex items-center justify-end gap-1">
+                          {/* 查看切片详情按钮 */}
+                          <button
+                            onClick={() => handleOpenChunks(doc)}
+                            className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded transition-colors"
+                            title="查看切片详情与向量"
+                          >
+                            <Eye className="w-3.5 h-3.5" />
+                          </button>
+                          {/* 原文件下载 */}
+                          <button
+                            onClick={() => handleDownloadDoc(doc.id)}
+                            className="p-1.5 text-slate-400 hover:text-sky-600 hover:bg-sky-50 rounded transition-colors"
+                            title="下载原文件"
+                          >
+                            <Download className="w-3.5 h-3.5" />
+                          </button>
+                          {/* 重新处理 */}
+                          <button
+                            onClick={() => handleReprocessDoc(doc.id)}
+                            className="p-1.5 text-slate-400 hover:text-amber-600 hover:bg-amber-50 rounded transition-colors"
+                            title="重新触发解析与切片"
+                          >
+                            <RefreshCw className="w-3.5 h-3.5" />
+                          </button>
+                          {/* 重命名 */}
+                          <button
+                            onClick={() => handleRenameDoc(doc)}
+                            className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded transition-colors"
+                            title="重命名文档"
+                          >
+                            <Edit2 className="w-3.5 h-3.5" />
+                          </button>
+                          {/* 删除 */}
+                          <button
+                            onClick={() => handleDeleteDoc(doc.id)}
+                            className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded transition-colors"
+                            title="删除文档"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -366,6 +476,16 @@ export const KnowledgePage: React.FC = () => {
           onSuccess={loadDocuments}
         />
       )}
+
+      {/* 切片查看弹窗 */}
+      <DocumentChunksModal
+        isOpen={isChunksModalOpen}
+        document={selectedDocForChunks}
+        onClose={() => {
+          setIsChunksModalOpen(false)
+          setSelectedDocForChunks(null)
+        }}
+      />
     </div>
   )
 }

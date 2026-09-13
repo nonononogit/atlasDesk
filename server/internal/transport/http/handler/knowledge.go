@@ -346,6 +346,163 @@ func (h *KnowledgeHandler) DeleteDocument(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"message": "文档已成功删除"}, "request_id": reqID})
 }
 
+// ReprocessDocument 重新触发文档解析与向量化处理
+// POST /api/v1/documents/:id/reprocess
+func (h *KnowledgeHandler) ReprocessDocument(c *gin.Context) {
+	reqID, _ := c.Get("RequestID")
+	orgUID, ok := getOrgUUID(c)
+	if !ok {
+		return
+	}
+
+	docID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"code": "INVALID_ID", "message": "无效的文档 ID"}, "request_id": reqID})
+		return
+	}
+
+	if err := h.knowledgeService.ReprocessDocument(c.Request.Context(), orgUID, docID); err != nil {
+		if errors.Is(err, service.ErrDocumentNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"code": "NOT_FOUND", "message": err.Error()}, "request_id": reqID})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"code": "REPROCESS_FAILED", "message": err.Error()}, "request_id": reqID})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{"message": "已重新提交处理任务"}, "request_id": reqID})
+}
+
+// GetDownloadURL 生成原文档只读临时下载链接
+// GET /api/v1/documents/:id/download
+func (h *KnowledgeHandler) GetDownloadURL(c *gin.Context) {
+	reqID, _ := c.Get("RequestID")
+	orgUID, ok := getOrgUUID(c)
+	if !ok {
+		return
+	}
+
+	docID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"code": "INVALID_ID", "message": "无效的文档 ID"}, "request_id": reqID})
+		return
+	}
+
+	downloadURL, err := h.knowledgeService.GetDownloadURL(c.Request.Context(), orgUID, docID)
+	if err != nil {
+		if errors.Is(err, service.ErrDocumentNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"code": "NOT_FOUND", "message": err.Error()}, "request_id": reqID})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"code": "DOWNLOAD_URL_FAILED", "message": err.Error()}, "request_id": reqID})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{"download_url": downloadURL}, "request_id": reqID})
+}
+
+// RenameDocument 重命名文档
+// PATCH /api/v1/documents/:id/rename
+func (h *KnowledgeHandler) RenameDocument(c *gin.Context) {
+	reqID, _ := c.Get("RequestID")
+	orgUID, ok := getOrgUUID(c)
+	if !ok {
+		return
+	}
+
+	docID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"code": "INVALID_ID", "message": "无效的文档 ID"}, "request_id": reqID})
+		return
+	}
+
+	var req struct {
+		Name string `json:"name" binding:"required,max=255"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"code": "INVALID_REQUEST", "message": "参数格式错误: name 必填且不超过 255 字符"}, "request_id": reqID})
+		return
+	}
+
+	doc, err := h.knowledgeService.RenameDocument(c.Request.Context(), orgUID, docID, req.Name)
+	if err != nil {
+		if errors.Is(err, service.ErrDocumentNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"code": "NOT_FOUND", "message": err.Error()}, "request_id": reqID})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"code": "RENAME_FAILED", "message": err.Error()}, "request_id": reqID})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": doc, "request_id": reqID})
+}
+
+// CreateNewVersion 创建新物理版本
+// POST /api/v1/documents/:id/versions
+func (h *KnowledgeHandler) CreateNewVersion(c *gin.Context) {
+	reqID, _ := c.Get("RequestID")
+	orgUID, ok := getOrgUUID(c)
+	if !ok {
+		return
+	}
+
+	docID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"code": "INVALID_ID", "message": "无效的文档 ID"}, "request_id": reqID})
+		return
+	}
+
+	var req domain.DocumentUploadReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"code": "INVALID_REQUEST", "message": "参数格式错误"}, "request_id": reqID})
+		return
+	}
+
+	resp, err := h.knowledgeService.CreateNewVersion(c.Request.Context(), orgUID, docID, &req)
+	if err != nil {
+		switch {
+		case errors.Is(err, service.ErrFileSizeExceeded):
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"code": "FILE_TOO_LARGE", "message": err.Error()}, "request_id": reqID})
+		case errors.Is(err, service.ErrDocumentNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"code": "NOT_FOUND", "message": err.Error()}, "request_id": reqID})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"code": "INTERNAL_ERROR", "message": err.Error()}, "request_id": reqID})
+		}
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{"data": resp, "request_id": reqID})
+}
+
+// GetDocumentChunks 查询文档当前版本的切片列表
+// GET /api/v1/documents/:id/chunks
+func (h *KnowledgeHandler) GetDocumentChunks(c *gin.Context) {
+	reqID, _ := c.Get("RequestID")
+	orgUID, ok := getOrgUUID(c)
+	if !ok {
+		return
+	}
+
+	docID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"code": "INVALID_ID", "message": "无效的文档 ID"}, "request_id": reqID})
+		return
+	}
+
+	chunks, err := h.knowledgeService.GetDocumentChunks(c.Request.Context(), orgUID, docID)
+	if err != nil {
+		if errors.Is(err, service.ErrDocumentNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"code": "NOT_FOUND", "message": err.Error()}, "request_id": reqID})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{"code": "GET_CHUNKS_FAILED", "message": err.Error()}, "request_id": reqID})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": chunks, "request_id": reqID})
+}
+
+
 func getOrgUUID(c *gin.Context) (uuid.UUID, bool) {
 	orgVal, exists := c.Get("CurrentOrgID")
 	if !exists {

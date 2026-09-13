@@ -43,6 +43,20 @@ export interface UploadTicket {
   expires_in: number
 }
 
+export interface DocumentChunk {
+  id: string
+  chunk_index: number
+  content: string
+  token_count: number
+  metadata: {
+    document_name?: string
+    heading_path?: string
+    page_number?: number
+    source_version?: number
+  }
+  created_at: string
+}
+
 // 知识库 API 接口
 export const knowledgeApi = {
   // 1. 获取知识库列表
@@ -97,6 +111,28 @@ export const knowledgeApi = {
   // 8. 软删除文档
   deleteDocument: (documentId: string) =>
     apiClient.delete(`/api/v1/documents/${documentId}`),
+
+  // 9. 重新触发文档解析与向量化
+  reprocessDocument: (documentId: string) =>
+    apiClient.post<{ message: string }>(`/api/v1/documents/${documentId}/reprocess`),
+
+  // 10. 获取原文件预签名下载链接
+  getDownloadUrl: (documentId: string) =>
+    apiClient.get<{ download_url: string }>(`/api/v1/documents/${documentId}/download`),
+
+  // 11. 重命名文档
+  renameDocument: (documentId: string, name: string) =>
+    apiClient.patch<DocumentItem>(`/api/v1/documents/${documentId}/rename`, { name }),
+
+  // 12. 申请新物理版本直传凭证
+  createNewVersion: (
+    documentId: string,
+    data: { knowledge_base_id: string; name: string; mime_type: string; size: number },
+  ) => apiClient.post<UploadTicket>(`/api/v1/documents/${documentId}/versions`, data),
+
+  // 13. 获取文档当前版本的切片列表
+  getDocumentChunks: (documentId: string) =>
+    apiClient.get<DocumentChunk[]>(`/api/v1/documents/${documentId}/chunks`),
 }
 
 // 基于原生 XHR 直传对象存储并获取真实百分比进度
