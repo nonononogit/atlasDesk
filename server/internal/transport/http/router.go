@@ -10,10 +10,11 @@ import (
 
 // RouterDeps 定义路由引擎组装所需的依赖项
 type RouterDeps struct {
-	Config        *config.Config
-	HealthHandler *handler.HealthHandler
-	AuthHandler   *handler.AuthHandler
-	AuthService   service.AuthService
+	Config           *config.Config
+	HealthHandler    *handler.HealthHandler
+	AuthHandler      *handler.AuthHandler
+	AuthService      service.AuthService
+	KnowledgeHandler *handler.KnowledgeHandler
 }
 
 // NewRouter 创建并初始化符合规范第 6.2 节的 Gin 路由引擎
@@ -61,13 +62,49 @@ func NewRouter(deps *RouterDeps) *gin.Engine {
 		}
 
 		// 受保护接口分组: 挂载第 7-8 层中间件 (Authentication -> OrganizationContext)
-		if deps.AuthService != nil && deps.AuthHandler != nil {
+		if deps.AuthService != nil {
 			protected := apiV1.Group("")
 			protected.Use(middleware.Authentication(deps.AuthService))
 			protected.Use(middleware.OrganizationContext())
 			{
 				// 获取当前用户身份与组织权限
-				protected.GET("/auth/me", deps.AuthHandler.Me)
+				if deps.AuthHandler != nil {
+					protected.GET("/auth/me", deps.AuthHandler.Me)
+				}
+
+				// 知识库与文档路由 (受 RBAC 权限控制)
+				if deps.KnowledgeHandler != nil {
+					// 知识库只读路由
+					kbRead := protected.Group("/knowledge-bases", middleware.RequirePermission("knowledge:read"))
+					{
+						kbRead.GET("", deps.KnowledgeHandler.ListKnowledgeBases)
+						kbRead.GET("/:id", deps.KnowledgeHandler.GetKnowledgeBase)
+					}
+
+					// 知识库管理写路由
+					kbWrite := protected.Group("/knowledge-bases", middleware.RequirePermission("knowledge:write"))
+					{
+						kbWrite.POST("", deps.KnowledgeHandler.CreateKnowledgeBase)
+						kbWrite.PATCH("/:id", deps.KnowledgeHandler.UpdateKnowledgeBase)
+						kbWrite.DELETE("/:id", deps.KnowledgeHandler.DeleteKnowledgeBase)
+					}
+
+					// 文档只读路由
+					docRead := protected.Group("/documents", middleware.RequirePermission("knowledge:read"))
+					{
+						docRead.GET("", deps.KnowledgeHandler.ListDocuments)
+						docRead.GET("/:id", deps.KnowledgeHandler.GetDocument)
+						docRead.GET("/:id/status", deps.KnowledgeHandler.GetDocumentStatus)
+					}
+
+					// 文档直传与管理写路由
+					docWrite := protected.Group("/documents", middleware.RequirePermission("knowledge:write"))
+					{
+						docWrite.POST("/uploads", deps.KnowledgeHandler.RequestUpload)
+						docWrite.POST("/:id/complete-upload", deps.KnowledgeHandler.CompleteUpload)
+						docWrite.DELETE("/:id", deps.KnowledgeHandler.DeleteDocument)
+					}
+				}
 			}
 		}
 	}

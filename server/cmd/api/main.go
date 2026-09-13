@@ -13,6 +13,7 @@ import (
 	"atlasdesk/internal/config"
 	"atlasdesk/internal/platform/database"
 	"atlasdesk/internal/platform/redis"
+	"atlasdesk/internal/platform/storage"
 	"atlasdesk/internal/repository"
 	"atlasdesk/internal/service"
 	transporthttp "atlasdesk/internal/transport/http"
@@ -31,12 +32,21 @@ func main() {
 	// 2. 加载系统全局配置
 	cfg := config.Load()
 
-	// 3. 初始化数据库连接
+	// 3. 初始化 MinIO 对象存储客户端
+	storageClient, storageErr := storage.NewMinIOClient(&cfg.Storage)
+	if storageErr != nil {
+		slog.Warn("初始化 MinIO 对象存储失败 (预签名直传将使用本地模拟模式)", "error", storageErr.Error())
+	}
+
+	// 4. 初始化数据库连接
 	var dbClient *database.DB
 	var dbErr error
 	var authRepo repository.AuthRepository
 	var authSvc service.AuthService
 	var authHandler *handler.AuthHandler
+	var knowledgeRepo repository.KnowledgeRepository
+	var knowledgeSvc service.KnowledgeService
+	var knowledgeHandler *handler.KnowledgeHandler
 
 	dbClient, dbErr = database.New(&cfg.Database)
 	if dbErr != nil {
@@ -57,13 +67,18 @@ func main() {
 		}
 		initCancel()
 
-		// 组装业务仓储与服务实例
+		// 组装认证业务仓储与服务实例
 		authRepo = repository.NewAuthRepository(dbClient.GormDB)
 		authSvc = service.NewAuthService(authRepo, &cfg.JWT)
 		authHandler = handler.NewAuthHandler(authSvc)
+
+		// 组装知识库业务仓储与服务实例
+		knowledgeRepo = repository.NewKnowledgeRepository(dbClient.GormDB)
+		knowledgeSvc = service.NewKnowledgeService(knowledgeRepo, storageClient)
+		knowledgeHandler = handler.NewKnowledgeHandler(knowledgeSvc)
 	}
 
-	// 4. 初始化 Redis 客户端
+	// 5. 初始化 Redis 客户端
 	var redisClient *redis.Client
 	var redisErr error
 	redisClient, redisErr = redis.New(&cfg.Redis)
@@ -74,7 +89,7 @@ func main() {
 		defer redisClient.Close()
 	}
 
-	// 5. 初始化健康检查 Handler
+	// 6. 初始化健康检查 Handler
 	var dbChecker handler.Checker
 	if dbClient != nil {
 		dbChecker = dbClient
@@ -85,15 +100,16 @@ func main() {
 	}
 	healthHandler := handler.NewHealthHandler(dbChecker, redisChecker)
 
-	// 6. 初始化 HTTP 路由，按规范挂载 9 层中间件与认证路由
+	// 7. 初始化 HTTP 路由，按规范挂载 9 层中间件与认证、知识库路由
 	router := transporthttp.NewRouter(&transporthttp.RouterDeps{
-		Config:        cfg,
-		HealthHandler: healthHandler,
-		AuthHandler:   authHandler,
-		AuthService:   authSvc,
+		Config:           cfg,
+		HealthHandler:    healthHandler,
+		AuthHandler:      authHandler,
+		AuthService:      authSvc,
+		KnowledgeHandler: knowledgeHandler,
 	})
 
-	// 7. 配置 HTTP 服务实例
+	// 8. 配置 HTTP 服务实例
 	srv := &http.Server{
 		Addr:         ":" + cfg.App.Port,
 		Handler:      router,
@@ -102,7 +118,7 @@ func main() {
 		IdleTimeout:  60 * time.Second,
 	}
 
-	// 8. 异步启动服务监听
+	// 9. 异步启动服务监听
 	go func() {
 		slog.Info("AtlasDesk API 服务已启动", "port", cfg.App.Port, "env", cfg.App.Env)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -111,7 +127,7 @@ func main() {
 		}
 	}()
 
-	// 9. 优雅停机信号监听 (Graceful Shutdown)
+	// 10. 优雅停机信号监听 (Graceful Shutdown)
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit

@@ -2,10 +2,14 @@ package database_test
 
 import (
 	"context"
+	"io/fs"
 	"regexp"
+	"sort"
+	"strings"
 	"testing"
 
 	"atlasdesk/internal/platform/database"
+	"atlasdesk/migrations"
 	"github.com/DATA-DOG/go-sqlmock"
 )
 
@@ -20,49 +24,70 @@ func TestMigrator_UpAndDown(t *testing.T) {
 	migrator := database.NewMigrator(db)
 	ctx := context.Background()
 
-	// 1. 模拟 Up 阶段：初始化表 -> 检查是否已应用 (未应用) -> 开启事务 -> 执行 SQL -> 插入记录 -> 提交事务
+	// 读取当前所有的 up 文件
+	entries, err := fs.ReadDir(migrations.Files, ".")
+	if err != nil {
+		t.Fatalf("读取迁移文件失败: %v", err)
+	}
+
+	var upVersions []string
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".up.sql") {
+			upVersions = append(upVersions, strings.TrimSuffix(entry.Name(), ".up.sql"))
+		}
+	}
+	sort.Strings(upVersions)
+
+	// 1. 模拟 Up 阶段：依次执行所有未应用的迁移
 	mock.ExpectExec(regexp.QuoteMeta("CREATE TABLE IF NOT EXISTS schema_migrations")).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = $1)")).
-		WithArgs("000001_auth_schema").
-		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
+	for _, v := range upVersions {
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = $1)")).
+			WithArgs(v).
+			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
 
-	mock.ExpectBegin()
-	mock.ExpectExec("CREATE TABLE IF NOT EXISTS organizations").
-		WillReturnResult(sqlmock.NewResult(1, 1))
-	mock.ExpectExec(regexp.QuoteMeta("INSERT INTO schema_migrations (version) VALUES ($1)")).
-		WithArgs("000001_auth_schema").
-		WillReturnResult(sqlmock.NewResult(1, 1))
-	mock.ExpectCommit()
+		mock.ExpectBegin()
+		mock.ExpectExec("CREATE TABLE IF NOT EXISTS").
+			WillReturnResult(sqlmock.NewResult(1, 1))
+		mock.ExpectExec(regexp.QuoteMeta("INSERT INTO schema_migrations (version) VALUES ($1)")).
+			WithArgs(v).
+			WillReturnResult(sqlmock.NewResult(1, 1))
+		mock.ExpectCommit()
+	}
 
 	if err := migrator.Up(ctx); err != nil {
 		t.Fatalf("Migrator.Up 预期执行成功，实际报错: %v", err)
 	}
 
-	// 2. 模拟 Up 幂等性：再次运行已存在时跳过
+	// 2. 模拟 Up 幂等性：全部已存在时直接跳过
 	mock.ExpectExec(regexp.QuoteMeta("CREATE TABLE IF NOT EXISTS schema_migrations")).
 		WillReturnResult(sqlmock.NewResult(1, 1))
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = $1)")).
-		WithArgs("000001_auth_schema").
-		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+
+	for _, v := range upVersions {
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = $1)")).
+			WithArgs(v).
+			WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
+	}
 
 	if err := migrator.Up(ctx); err != nil {
 		t.Fatalf("Migrator.Up 幂等重复执行预期成功，实际报错: %v", err)
 	}
 
-	// 3. 模拟 Down 回滚阶段
+	// 3. 模拟 Down 回滚阶段（回滚最新一个版本）
 	mock.ExpectExec(regexp.QuoteMeta("CREATE TABLE IF NOT EXISTS schema_migrations")).
 		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	latestVersion := upVersions[len(upVersions)-1]
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT version FROM schema_migrations ORDER BY applied_at DESC, version DESC LIMIT $1")).
 		WithArgs(1).
-		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow("000001_auth_schema"))
+		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(latestVersion))
 
 	mock.ExpectBegin()
-	mock.ExpectExec("DROP TABLE IF EXISTS refresh_sessions;").
+	mock.ExpectExec("DROP TABLE IF EXISTS").
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM schema_migrations WHERE version = $1")).
-		WithArgs("000001_auth_schema").
+		WithArgs(latestVersion).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
 

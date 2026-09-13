@@ -1,8 +1,8 @@
 # AtlasDesk Development Progress
 
 ## 当前阶段
-- Phase: P1
-- 当前任务: P1-T04
+- Phase: P2
+- 当前任务: P2-T04
 - 状态: completed
 
 ## 已完成
@@ -14,9 +14,13 @@
 - [x] P1-T02 — 2026-09-13 — 验证：实现 login、refresh、logout、me 接口与服务，单测验证登录成功、密码错误拦截、停用用户拦截、令牌过期失效、注销后令牌废弃通过
 - [x] P1-T03 — 2026-09-13 — 验证：实现 RequestID、Recovery、CORS、SecurityHeaders、AccessLog、RateLimit、Authentication、OrganizationContext、RequirePermission 中间件，单测覆盖 401/403/越权拦截通过
 - [x] P1-T04 — 2026-09-13 — 验证：实现企业级 LoginPage、AppLayout、ProtectedRoute、Zustand authStore 与原生 fetch 客户端（内存令牌+排队无感刷新），并通过 TypeScript 严格类型校验
+- [x] P2-T01 — 2026-09-13 — 验证：创建 000002_knowledge_schema 迁移与知识库 CRUD 接口，单测验证同组织同名拒绝、跨组织同名允许及软删除通过
+- [x] P2-T02 — 2026-09-13 — 验证：创建 documents 与 document_versions 模型，实现多租户游标分页、按状态/MIME 筛选与关键字搜索
+- [x] P2-T03 — 2026-09-13 — 验证：实现预签名直传凭证申请，严格校验 PDF/DOCX/MD/TXT 白名单与 50MB 大小配额，单测拦截非法格式与超限文件通过
+- [x] P2-T04 — 2026-09-13 — 验证：实现确认上传核验、文档状态机流转 (UPLOADING -> UPLOADED)、重复确认幂等控制与前端 3 秒批量轮询机制
 
 ## 待完成
-- [ ] Phase 2：知识库和上传（P2-T01 知识库 CRUD）— 阻塞：无
+- [ ] Phase 3：解析、切片和向量（P3-T01 Worker 和状态）— 阻塞：无
 
 ## 技术决策
 - ADR-001: 依赖注入与分层设计：遵循第 3 节规范，transport/http -> application -> domain，repository interface 位于 domain，实现置于 repository/platform。
@@ -26,6 +30,7 @@
 - ADR-005: 安全令牌设计：短时 JWT Access Token 存放内存；Refresh Token 采用 32 字节高熵随机串并哈希存储，结合 HttpOnly Cookie 传输与强制会话轮换（Token Rotation）。
 - ADR-006: 严格中间件管道链：中间件严格遵循 9 层安全与上下文流转，组织隔离由 OrganizationContext 强化，业务接口通过 RequirePermission 声明式校验。
 - ADR-007: 前端认证安全与无感排队：前端 Access Token 仅保存在内存变量中，防止 XSS 窃取；401 时启动单次并发锁排队调用 /api/v1/auth/refresh 换取新令牌并重放等待队列；刷新受保护路由时使用全局加载守卫，杜绝未授权界面闪现。
+- ADR-008: 预签名直传与真实进度：规避大文件经过应用服务器带来的带宽瓶颈与网络超时风险，前端通过后端签发的预签名 PUT URL 采用原生 XHR 直传 MinIO/S3，获取真实上传进度；确认上传接口校验对象存储实际元数据并实现幂等保护。
 
 ## 已知问题
 - ISSUE-001: 宿主机未检测到 Docker 环境，容器编排需在容器运行时就绪或独立测试环境中使用。
